@@ -1,0 +1,49 @@
+[project]
+name = "next-sequence"
+version = "0.1.0"
+description = "Next-sequence prediction model with a PyTorch backend"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    # Keep this generic: the end user's environment decides CPU vs CUDA vs MPS build.
+    "torch>=2.4",
+]
+
+[dependency-groups]
+dev = [
+    "ipykernel>=7.4.0",
+    "pandas>=3.1.1",
+    "pytest>=8",
+]
+# Dev-only selectors for which torch build uv installs (not published).
+# `gpu` is on by default (see default-groups); use `--no-group gpu --group cpu` for CPU.
+cpu = ["torch>=2.4"]
+gpu = ["torch>=2.4"]
+
+[build-system]
+requires = ["uv_build>=0.8,<0.10"]
+build-backend = "uv_build"
+
+# ---------------------------------------------------------------------------
+# uv-only settings below. They are NOT included in the published wheel metadata;
+# they only control how torch is resolved when developing this repo with uv.
+# ---------------------------------------------------------------------------
+[tool.uv]
+default-groups = ["dev", "gpu"]
+conflicts = [[{ group = "cpu" }, { group = "gpu" }]]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu", group = "cpu", marker = "sys_platform != 'darwin'" },
+    { index = "pytorch-cu132", group = "gpu", marker = "sys_platform != 'darwin'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu132"
+url = "https://download.pytorch.org/whl/cu132"
+explicit = true
