@@ -1,7 +1,6 @@
 # This is done
 
-from dataclasses import dataclass, field
-from typing import Optional
+from dataclasses import dataclass
 from enum import Enum
 from torch.utils.data import Dataset
 
@@ -25,3 +24,14 @@ class Feature:
     task:TaskType
     vocab_size:int = 0
     is_linear:bool = False
+
+    def __post_init__(self):
+        self.task = TaskType(self.task)
+
+    def to_dict(self):
+        return dict(
+            name=self.name,
+            task=self.task.value,
+            vocab_size=self.vocab_size,
+            is_linear=self.is_linear
+        )

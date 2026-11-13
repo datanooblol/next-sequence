@@ -1,10 +1,12 @@
+# done
 from enum import Enum
 import torch
 import torch.nn as nn
 
 class RoPEStrategy(Enum):
     INTERLEAVED = "interleaved"
-    HALF_SPLIT = "half_split"
+    # implement only interleaved for now
+    # HALF_SPLIT = "half_split"
 
 class RoPE(nn.Module):
     cos: torch.Tensor
@@ -20,6 +22,9 @@ class RoPE(nn.Module):
         super().__init__()
         assert head_dim % 2 == 0, f"head_dim must be even, got {head_dim}"
         self.strategy = RoPEStrategy(strategy)
+        self.head_dim = head_dim
+        self.max_len = max_len
+        self.base = base
 
         theta = 1.0 / base ** (torch.arange(0, head_dim, 2).float() / head_dim)
         angles = torch.outer(torch.arange(max_len).float(), theta)
@@ -32,14 +37,14 @@ class RoPE(nn.Module):
         self.register_buffer("cos", emb.cos(), persistent=False)
         self.register_buffer("sin", emb.sin(), persistent=False)
 
-    def _rotate(self, x):
+    def _rotate(self, x:torch.Tensor)->torch.Tensor:
         if self.strategy == RoPEStrategy.INTERLEAVED:
             x1, x2 = x[..., 0::2], x[..., 1::2]
             return torch.stack((-x2, x1), dim=-1).flatten(-2)
         x1, x2 = x.chunk(2, dim=-1)
         return torch.cat((-x2, x1), dim=-1)
 
-    def forward(self, x):
+    def forward(self, x:torch.Tensor)->torch.Tensor:
         T = x.shape[1]
         assert T <= self.cos.shape[0], f"seq len {T} > max_len {self.cos.shape[0]}"
         cos = self.cos[:T][None, :, None, :]

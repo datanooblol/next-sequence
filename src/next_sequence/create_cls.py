@@ -6,7 +6,7 @@ class PrependCLS(nn.Module):
         super().__init__()
         self.cls = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
 
-    def forward(self, X, pad_mask):
+    def forward(self, X:torch.Tensor, pad_mask:torch.Tensor):
         B = X.shape[0]
         x = torch.cat([self.cls.expand(B, -1, -1), X], dim=1)
         cls_col = torch.zeros(B, 1, dtype=torch.bool, device=pad_mask.device)

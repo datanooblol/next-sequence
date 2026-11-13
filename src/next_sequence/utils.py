@@ -1,4 +1,6 @@
-def create_bow(array:list)->tuple:
+from typing import Any
+
+def create_bow(array:list)->dict[str, Any]:
     """
     Args:
         array (list): Sequences to build a bag of word
@@ -16,4 +18,4 @@ def create_bow(array:list)->tuple:
         'PAD': 0
     }
     bow.update({w:idx+1 for idx, w in enumerate(_bow)})
-    return bow, len(bow), max_len
+    return bow

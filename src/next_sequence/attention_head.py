@@ -1,14 +1,19 @@
+# torch
 import torch.nn as nn
+from next_sequence.position_embedding import RoPE
+import torch
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, d_model, n_heads, rope=None):
+    def __init__(self, d_model:int, n_heads:int, rope:RoPE|None=None):
         super().__init__()
         assert d_model % n_heads == 0
-        self.n_heads, self.head_dim = n_heads, d_model // n_heads
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
         self.wQ, self.wK, self.wV, self.wO = (nn.Linear(d_model, d_model) for _ in range(4))
         self.rope = rope
 
-    def forward(self, x, pad_mask=None):
+    def forward(self, x:torch.Tensor, pad_mask:torch.Tensor|None=None)->torch.Tensor:
         B, T, d = x.shape
         q = self.wQ(x).view(B, T, self.n_heads, self.head_dim)
         k = self.wK(x).view(B, T, self.n_heads, self.head_dim)

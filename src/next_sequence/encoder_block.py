@@ -43,7 +43,11 @@ class EncoderCLSBackbone(nn.Module):
         assert d % n_heads == 0
         assert rope.cos.shape[-1] == d // n_heads, "RoPE must be built with head_dim"
         assert prepend_cls.cls.shape[-1] == d, "CLS width must equal fusion.d_out"
+        self.n_heads = n_heads
         self.d_model = d
+        self.num_layers = num_layers
+        self.expansion = expansion
+        self.dropout = dropout
         self.embedding, self.fusion = embedding, fusion
         self.prepend_cls, self.rope = prepend_cls, rope
         self.layers = nn.ModuleList(

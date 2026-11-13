@@ -1,6 +1,6 @@
+# maybe more idea on fusion strategy
 from abc import ABC, abstractmethod
 import torch.nn as nn
-import torch
 from next_sequence.core import Feature
 from typing import Any
 
@@ -17,3 +17,5 @@ class BaseFusion(nn.Module, ABC):
 
     @abstractmethod
     def forward(self, X:dict[str, Any])->Any: ...
+
+# should we implement fusion strategy here?
