@@ -17,6 +17,7 @@ class CoreDataset(Dataset):
 class TaskType(Enum):
     CLASSIFICATION = 'classification'
     REGRESSION = 'regression'
+    PASSTHROUGH = 'passthrough'
 
 @dataclass
 class Feature:

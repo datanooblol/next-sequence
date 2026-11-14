@@ -30,7 +30,7 @@ class NextSequenceConfig:
     features:list[Feature]
     max_len:int
     emb_dim:int = 128
-    fusion_dim:int = 128
+    fusion_dim:int|None = None
     fusion_strategy:FusionStrategy = FusionStrategy.SUM
     rope_strategy:RoPEStrategy = RoPEStrategy.INTERLEAVED
     attn_heads:int = 2
@@ -41,6 +41,8 @@ class NextSequenceConfig:
     def __post_init__(self):
         self.fusion_strategy = FusionStrategy(self.fusion_strategy)
         self.rope_strategy = RoPEStrategy(self.rope_strategy)
+        if self.fusion_dim is None:
+            self.fusion_dim = self.emb_dim
 
 
 class NextSequenceModel(nn.Module):
@@ -48,11 +50,11 @@ class NextSequenceModel(nn.Module):
         super().__init__()
         self.configs = configs
         self.embedding = EmbeddingModel(configs.features, configs.emb_dim)
-        self.fusion = FUSION_REGISTRY[configs.fusion_strategy](configs.features, configs.fusion_dim)
-        self.prepend_cls = PrependCLS(configs.fusion_dim)
-        self.rope = RoPE(configs.fusion_dim//configs.attn_heads, configs.max_len+1)
+        self.fusion = FUSION_REGISTRY[configs.fusion_strategy](configs.features, self.embedding.d_model, configs.fusion_dim)
+        self.prepend_cls = PrependCLS(self.fusion.d_out)
+        self.rope = RoPE(self.fusion.d_out//configs.attn_heads, configs.max_len+1)
         self.backbone = EncoderCLSBackbone(self.embedding, self.fusion, self.prepend_cls, self.rope, configs.attn_heads, configs.num_layers, configs.expansion, configs.dropout)
-        self.mlh = MultiTaskHeads(configs.features, configs.fusion_dim)
+        self.mlh = MultiTaskHeads(configs.features, self.fusion.d_out)
         self.model = MultiTaskModel(self.backbone, self.mlh)
 
     def forward(self, X:dict[str, torch.Tensor], pad_mask:torch.Tensor|None):

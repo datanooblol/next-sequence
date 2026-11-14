@@ -7,6 +7,7 @@ from typing import Any
 class MultiTaskHeads(nn.Module):
     def __init__(self, features:list[Feature], d_model:int):
         super().__init__()
+        self.features = features
         self.heads = nn.ModuleDict()
         for feature in features:
             if feature.task == TaskType.CLASSIFICATION:
@@ -19,4 +20,9 @@ class MultiTaskHeads(nn.Module):
             # that will work with softplus. However, we can do it later
 
     def forward(self, X:torch.Tensor)->dict[str, Any]:
-        return {feature_name: task_head(X) for feature_name, task_head in self.heads.items()}
+        # we can be lesser than or equal to a number of features
+        return {
+            feature.name: self.heads[feature.name](X)
+            for feature in self.features
+            if feature.task != TaskType.PASSTHROUGH
+        }

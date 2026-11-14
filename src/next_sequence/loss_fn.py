@@ -2,31 +2,46 @@
 import torch
 import torch.nn as nn
 from next_sequence.core import Feature, TaskType
+
+
+def calculate_loss(y_true, y_pred, features):
+    ce = nn.CrossEntropyLoss(ignore_index=0)
+    mse = nn.MSELoss()
+    losses = {}
+    for feature in features:
+        if feature.task == TaskType.CLASSIFICATION:
+            losses[feature.name] = ce(y_pred[feature.name], y_true[feature.name])
+        if feature.task == TaskType.REGRESSION:
+            losses[feature.name] = mse(y_pred[feature.name].squeeze(-1), y_true[feature.name])
+    return losses
         
 class UncertaintyWeightedLoss(nn.Module):
     def __init__(self, features: list[Feature]):
         super().__init__()
         self.features = features
-        self.log_vars = nn.ParameterDict(
-            {f.name: nn.Parameter(torch.zeros(())) for f in features}
-        )
+        self.log_vars = nn.ParameterDict({
+            feature.name: nn.Parameter(torch.zeros(())) 
+            for feature in features 
+            if feature.task != TaskType.PASSTHROUGH
+        })
 
     def forward(self, losses: dict[str, torch.Tensor]) -> torch.Tensor:
         terms = []
-        for f in self.features:
+        for feature in self.features:
             # noise as a start but it's a learnable parameter
-            s = self.log_vars[f.name]
+            s = self.log_vars[feature.name]
             # e^-s, task weight
             precision = torch.exp(-s)
-            loss = losses[f.name]
+            loss = losses[feature.name]
             # regularizer = (1/2) * noise
             # 0.5 here comes from 1/2 acting like a regularizer (from paper)
             regularizer = 0.5 * s
-            if f.task == TaskType.CLASSIFICATION:
+            if feature.task == TaskType.CLASSIFICATION:
                 error_term = precision * loss
-            else:  # regression / MSE
+                terms.append(error_term + regularizer)
+            elif feature.task == TaskType.REGRESSION:  # regression / MSE
                 error_term = 0.5 * precision * loss
-            terms.append(error_term + regularizer)
+                terms.append(error_term + regularizer)
         return torch.stack(terms).sum()
 
     def weights(self):
