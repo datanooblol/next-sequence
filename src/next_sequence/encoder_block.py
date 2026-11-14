@@ -2,7 +2,7 @@ from next_sequence.attention_head import MultiHeadAttention
 from next_sequence.position_embedding import RoPE
 from next_sequence.embedding import EmbeddingModel
 from next_sequence.fusion import BaseFusion
-from next_sequence.create_cls import PrependCLS
+from next_sequence.prepend_cls import PrependCLS
 import torch.nn as nn
 from typing import Any
 
