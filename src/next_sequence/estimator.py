@@ -42,10 +42,29 @@ class NextSequence:
         warm_start (bool): If True, a second ``fit`` continues from the current weights
             instead of starting from a fresh model.
 
-    Attributes (after ``fit`` or ``load``):
-        model_ (NextSequenceModel), criterion_ (UncertaintyWeightedLoss),
-        history_ (list[dict]): per-epoch metrics, best_epoch_ (int | None).
+    Attributes:
+        model_ (NextSequenceModel): The trained network (after ``fit`` or ``load``).
+        criterion_ (UncertaintyWeightedLoss): The loss with the learned task weights.
+        history_ (list[dict[str, Any]]): One row of metrics per epoch.
+        best_epoch_ (int | None): Epoch whose weights were kept (lowest validation loss).
+        metadata_ (dict[str, Any] | None): The ``metadata`` saved with the model (after ``load``).
+
+    Raises:
+        TypeError: If ``config`` is not a ``NextSequenceConfig``.
+        ValueError: If a training setting is out of range.
+
+    Example:
+        >>> model = NextSequence(config, epochs=20, seed=0)
+        >>> model.fit(train_loader, val_loader)
+        >>> out = model.predict(test_loader)
+        >>> model.save("model.pt", metadata={"bow": bow})
     """
+
+    model_: NextSequenceModel
+    criterion_: UncertaintyWeightedLoss
+    history_: list[dict[str, Any]]
+    best_epoch_: int | None
+    metadata_: dict[str, Any] | None
 
     def __init__(
         self,
@@ -82,33 +101,67 @@ class NextSequence:
     # ---------- helpers ----------
     @property
     def is_fitted(self) -> bool:
+        """True after ``fit`` or ``load``."""
         return hasattr(self, "model_")
 
     def _check_fitted(self) -> None:
+        """Raise ``NotFittedError`` unless ``fit`` or ``load`` has been called."""
         if not self.is_fitted:
             raise NotFittedError("This NextSequence is not fitted yet. Call fit() or load() first.")
 
     def _build(self) -> None:
+        """Create a fresh model and loss on ``self.device``."""
         if self.seed is not None:
             torch.manual_seed(self.seed)
         self.model_ = NextSequenceModel(self.config).to(self.device)
         self.criterion_ = UncertaintyWeightedLoss(self.config.features).to(self.device)
-        self.history_: list[dict[str, Any]] = []
-        self.best_epoch_: int | None = None
+        self.history_ = []
+        self.best_epoch_ = None
+        self.metadata_ = None
 
     def train_settings(self) -> dict[str, Any]:
+        """Training settings as a dict (saved in checkpoints).
+
+        Returns:
+            dict[str, Any]: ``epochs``, ``lr``, ``weight_decay``, ``warmup_ratio``, ``grad_clip``, ``seed``.
+        """
         return dict(epochs=self.epochs, lr=self.lr, weight_decay=self.weight_decay,
                     warmup_ratio=self.warmup_ratio, grad_clip=self.grad_clip, seed=self.seed)
 
     def task_weights(self) -> dict[str, float]:
-        """Learned effective weight of each task loss."""
+        """Learned effective weight of each task loss.
+
+        Returns:
+            dict[str, float]: Feature name -> weight multiplying that feature's loss.
+
+        Raises:
+            NotFittedError: If called before ``fit`` or ``load``.
+        """
         self._check_fitted()
         return self.criterion_.weights()
 
     # ---------- fit ----------
-    def fit(self, train_loader: Iterable[dict], val_loader: Iterable[dict] | None = None) -> "NextSequence":
-        """Train on ``train_loader``. With ``val_loader``, the weights of the best epoch
-        (lowest validation loss) are restored at the end."""
+    def fit(
+        self,
+        train_loader: Iterable[dict[str, Any]],
+        val_loader: Iterable[dict[str, Any]] | None = None,
+    ) -> "NextSequence":
+        """Train the model.
+
+        Args:
+            train_loader (Iterable[dict[str, Any]]): Batches from ``CustomCollate(inference=False)``; must
+                have a length (e.g. a ``DataLoader``). Shuffle it.
+            val_loader (Iterable[dict[str, Any]] | None): Validation batches. When given, the weights of the
+                epoch with the lowest validation loss are restored at the end.
+
+        Returns:
+            NextSequence: ``self``, so calls can be chained.
+
+        Raises:
+            TypeError: If ``train_loader`` has no length.
+            ValueError: If ``train_loader`` is empty or a batch has no targets.
+            FloatingPointError: If the loss becomes NaN or infinite.
+        """
         if not (self.warm_start and self.is_fitted):
             self._build()
         elif self.seed is not None:
@@ -151,6 +204,7 @@ class NextSequence:
 
     # ---------- predict ----------
     def _pad_masked_features(self, mask_pad: bool | Iterable[str]) -> set[str]:
+        """Resolve ``mask_pad`` to the set of feature names whose PAD logit is masked."""
         if mask_pad is False:
             return set()
         classification = {f.name: f for f in self.config.features if f.task == TaskType.CLASSIFICATION}
@@ -164,17 +218,29 @@ class NextSequence:
         return names
 
     @torch.no_grad()
-    def predict(self, loader: Iterable[dict], mask_pad: bool | Iterable[str] = False) -> dict[str, torch.Tensor]:
+    def predict(
+        self, loader: Iterable[dict[str, Any]], mask_pad: bool | Iterable[str] = False
+    ) -> dict[str, torch.Tensor]:
         """Raw outputs for every sample, in loader order, on CPU.
 
+        Use ``CustomCollate(inference=False)`` to evaluate (input = all but the last event,
+        ``Y`` is ignored) or ``inference=True`` to predict the event after the full history.
+
         Args:
-            loader: Batches from ``CustomCollate`` (``inference=True`` or False; ``Y`` is ignored).
-                Must not shuffle, or outputs won't line up with your samples.
-            mask_pad: If True, set the PAD logit (class 0) to ``-inf`` for classification features
-                that predict a token from their own vocabulary. Or pass feature names explicitly.
+            loader (Iterable[dict[str, Any]]): Batches from ``CustomCollate``. Must not shuffle,
+                or outputs won't line up with your samples.
+            mask_pad (bool | Iterable[str]): If True, set the PAD logit (class 0) to ``-inf`` for
+                classification features that predict a token from their own vocabulary
+                (categorical input with ``n_classes == vocab_size``). Or pass feature names.
 
         Returns:
-            dict[str, Tensor]: classification ``(N, C)`` logits, regression ``(N, 1)`` values.
+            dict[str, torch.Tensor]: Per predicted feature: classification ``(N, n_classes)``
+            logits, regression ``(N, 1)`` values, in the scale used for training.
+
+        Raises:
+            NotFittedError: If called before ``fit`` or ``load``.
+            ValueError: If the loader shuffles or is empty, or ``mask_pad`` names a
+                non-classification feature.
         """
         self._check_fitted()
         if isinstance(loader, DataLoader) and isinstance(loader.sampler, RandomSampler):
@@ -195,14 +261,18 @@ class NextSequence:
         return {name: torch.cat(parts) for name, parts in chunks.items()}
 
     # ---------- save / load ----------
-    def save(self, path: str | PathLike, metadata: dict[str, Any] | None = None) -> None:
-        """Save weights, config, training settings and history to one file.
+    def save(self, path: str | PathLike[str], metadata: dict[str, Any] | None = None) -> None:
+        """Save weights, config, training settings, history and your metadata to one file.
 
         Args:
-            path: Destination file, e.g. ``"model.pt"``.
-            metadata: Your own preprocessing (vocabularies, scaler means/stds, ...), stored as is.
-                Plain Python types (dict, list, str, int, float, bool, None) and tensors load
-                without ``trusted=True``.
+            path (str | PathLike[str]): Destination file, e.g. ``"model.pt"``. Parent folders
+                are created.
+            metadata (dict[str, Any] | None): Your own preprocessing (vocabularies, scaler
+                means/stds, ...), stored as is. Plain Python types (dict, list, str, int, float,
+                bool, None) and tensors load without ``trusted=True``.
+
+        Raises:
+            NotFittedError: If called before ``fit`` or ``load``.
         """
         self._check_fitted()
         from next_sequence import __version__
@@ -220,21 +290,31 @@ class NextSequence:
         }
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         torch.save(checkpoint, path)
+        self.metadata_ = metadata
 
     @classmethod
     def load(
         cls,
-        path: str | PathLike,
+        path: str | PathLike[str],
         device: str | torch.device | None = None,
         trusted: bool = False,
     ) -> "NextSequence":
         """Load a model saved with ``save``. The saved metadata is available as ``.metadata_``.
 
         Args:
-            path: File written by ``save``.
-            device: ``None`` picks CUDA, then MPS, then CPU. A GPU-trained model loads on CPU.
-            trusted: Allow arbitrary pickled objects in ``metadata`` (e.g. numpy arrays).
+            path (str | PathLike[str]): File written by ``save``.
+            device (str | torch.device | None): ``None`` picks CUDA, then MPS, then CPU. A
+                GPU-trained model loads on a CPU-only machine.
+            trusted (bool): Allow arbitrary pickled objects in ``metadata`` (e.g. numpy arrays).
                 Only use it for files you trust: unpickling can run code.
+
+        Returns:
+            NextSequence: A fitted instance, ready for ``predict`` or further ``fit`` with
+            ``warm_start=True``.
+
+        Raises:
+            RuntimeError: If the file can't be loaded in safe mode.
+            ValueError: If the file is not a next-sequence checkpoint or is from a newer version.
         """
         try:
             ckpt = torch.load(path, map_location="cpu", weights_only=not trusted)

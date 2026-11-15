@@ -1,7 +1,11 @@
+"""Preprocessing helpers."""
 from collections.abc import Hashable, Iterable
+from typing import Any
 
 PAD_TOKEN = 'PAD'
+"""Token reserved for padding; always id 0."""
 UNK_TOKEN = 'UNK'
+"""Token reserved for tokens missing from the vocabulary; always id 1."""
 
 
 def create_bow(
@@ -31,8 +35,9 @@ def create_bow(
     for seq in sequences:
         tokens.update(seq)
     tokens -= {pad_token, unk_token}
+    ordered: list[Any]
     try:
-        ordered = sorted(tokens)
+        ordered = sorted(tokens)            # type: ignore[type-var]  # TypeError handled below
     except TypeError:                       # mixed types, e.g. ints and strings
         ordered = sorted(tokens, key=lambda t: (type(t).__name__, repr(t)))
     bow: dict[Hashable, int] = {pad_token: 0, unk_token: 1}

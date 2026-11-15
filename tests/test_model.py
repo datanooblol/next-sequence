@@ -81,5 +81,5 @@ def test_rope_strategy_is_used(features):
 def test_too_long_input_fails_clearly(features):
     model = make_model(features)
     X = {"item": torch.ones(1, 9, dtype=torch.long), "price": torch.zeros(1, 9, 1)}
-    with pytest.raises(AssertionError, match="max_len"):
+    with pytest.raises(ValueError, match="max_len"):
         model(X)

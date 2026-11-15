@@ -218,3 +218,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Files written when running the cookbooks
+cookbooks/outputs/

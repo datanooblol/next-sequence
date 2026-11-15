@@ -1,18 +1,52 @@
 name: Publish to PyPI
 
+# Runs only when a version tag is pushed, e.g. `git tag v0.1.0 && git push origin v0.1.0`.
 on:
   push:
     tags:
       - "v*.*.*"
 
 jobs:
+  test:
+    name: test (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        python: ["3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      # CPU torch: runners have no GPU, and this avoids downloading the CUDA wheels
+      - name: Install
+        run: uv sync --locked --python ${{ matrix.python }} --no-group gpu --group cpu
+
+      - name: Test (library + cookbooks)
+        run: uv run --no-sync pytest -q
+
   build:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v3
+        uses: astral-sh/setup-uv@v6
+
+      - name: Check the tag matches the package version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          VERSION="$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")"
+          echo "tag=$TAG version=$VERSION"
+          if [ "$TAG" != "$VERSION" ]; then
+            echo "::error::Tag v$TAG does not match version $VERSION in pyproject.toml"
+            exit 1
+          fi
 
       - name: Build sdist and wheel
         run: uv build
@@ -26,6 +60,7 @@ jobs:
   publish:
     needs: build
     runs-on: ubuntu-latest
+    # environment: pypi
     permissions:
       id-token: write # required for PyPI trusted publishing
     steps:

@@ -53,7 +53,7 @@ features = [
 ]
 config = NextSequenceConfig(features=features, max_len=50, emb_dim=64, attn_heads=4)
 
-# 2. your samples + one conversion function per feature (see the cookbook)
+# 2. your samples + one conversion function per feature (see cookbook 02)
 collate = CustomCollate(features, "item", funcs, max_len=50)
 train_loader = DataLoader(CoreDataset(train), batch_size=64, shuffle=True, collate_fn=collate)
 val_loader = DataLoader(CoreDataset(val), batch_size=64, collate_fn=collate)
@@ -71,9 +71,20 @@ model = NextSequence.load("model.pt")          # a GPU-trained model also loads 
 model.metadata_["bow"]
 ```
 
-A complete, runnable version is in [examples/quickstart.py](examples/quickstart.py).
-**Read the [cookbook](docs/cookbook.md)** for how the data must look, how to split it, and the
-preprocessing pitfalls.
+## Cookbooks
+
+Step-by-step notebooks with their outputs, so you can read along or run them yourself
+(they also need `pandas`: `pip install next-sequence pandas`):
+
+| Notebook | What it shows |
+|---|---|
+| [01 · Quickstart](https://github.com/datanooblol/next-sequence/blob/main/cookbooks/01_quickstart.ipynb) | the whole workflow: raw events → train → predict → save |
+| [02 · Data preparation](https://github.com/datanooblol/next-sequence/blob/main/cookbooks/02_data_preparation.ipynb) | how samples must look, splitting by time, vocabulary, scaling, `CustomCollate` |
+| [03 · Custom collate functions](https://github.com/datanooblol/next-sequence/blob/main/cookbooks/03_custom_collate_functions.ipynb) | writing your own targets: next value, **delta**, **delta buckets**, ratio, several targets per column |
+| [04 · Features and model](https://github.com/datanooblol/next-sequence/blob/main/cookbooks/04_features_and_model.ipynb) | the `Feature` types, configuration, validation, model outputs |
+| [05 · Training](https://github.com/datanooblol/next-sequence/blob/main/cookbooks/05_training.ipynb) | `fit`, history, best epoch, task weights, reproducibility, `warm_start` |
+| [06 · Prediction and saving](https://github.com/datanooblol/next-sequence/blob/main/cookbooks/06_prediction_and_saving.ipynb) | evaluation vs. real prediction, decoding, top-k, `save` / `load`, new data |
+| [07 · Custom training loop](https://github.com/datanooblol/next-sequence/blob/main/cookbooks/07_custom_training_loop.ipynb) | the lower-level building blocks for your own loop |
 
 ## Features
 
@@ -125,9 +136,12 @@ Each input column is a `Feature`. Its `task` says what to predict from it:
 ```bash
 uv sync                                   # CUDA build of torch on Windows/Linux (default)
 uv sync --no-group gpu --group cpu        # CPU build instead
-uv run pytest
-uv run python examples/quickstart.py
+uv run pytest                             # includes running every cookbook
+uv run pytest -m "not cookbook"           # quick run without the notebooks
 ```
+
+The cookbooks are committed with their outputs. After changing them, re-run each notebook so the
+saved outputs stay current.
 
 ## License
 

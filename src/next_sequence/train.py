@@ -15,7 +15,11 @@ from next_sequence.loss_fn import UncertaintyWeightedLoss, calculate_loss
 
 # ---------- device ----------
 def default_device() -> torch.device:
-    """CUDA if available, then Apple MPS, then CPU."""
+    """Pick the best available device.
+
+    Returns:
+        torch.device: ``cuda`` if available, then Apple ``mps``, then ``cpu``.
+    """
     if torch.cuda.is_available():
         return torch.device("cuda")
     mps = getattr(torch.backends, "mps", None)
@@ -25,11 +29,28 @@ def default_device() -> torch.device:
 
 
 def resolve_device(device: str | torch.device | None) -> torch.device:
+    """Turn a user-supplied device into a ``torch.device``.
+
+    Args:
+        device (str | torch.device | None): ``None`` means ``default_device()``.
+
+    Returns:
+        torch.device: The device to use.
+    """
     return default_device() if device is None else torch.device(device)
 
 
 def to_device(obj: Any, device: torch.device, non_blocking: bool = True) -> Any:
-    """Move tensors inside nested dicts / lists / tuples to ``device``. Other values are kept."""
+    """Move tensors inside nested dicts / lists / tuples to ``device``. Other values are kept.
+
+    Args:
+        obj (Any): A tensor, or a dict / list / tuple that contains tensors (e.g. a batch).
+        device (torch.device): Target device.
+        non_blocking (bool): Passed to ``Tensor.to``; overlaps copies with compute on CUDA.
+
+    Returns:
+        Any: The same structure with every tensor on ``device``.
+    """
     if torch.is_tensor(obj):
         return obj.to(device, non_blocking=non_blocking)
     if isinstance(obj, Mapping):
@@ -51,8 +72,17 @@ def build_optimizer(
     No decay on biases, LayerNorm, embeddings, the CLS token, or the criterion's ``log_vars``
     (decay would pull every task weight toward 1). The criterion's parameters are included so the
     learned task weights actually train.
+
+    Args:
+        model (nn.Module): The network to train.
+        criterion (nn.Module): The loss module (its parameters are trained too).
+        lr (float): Learning rate.
+        weight_decay (float): Weight decay for weight matrices.
+
+    Returns:
+        torch.optim.Optimizer: An ``AdamW`` optimizer with separate parameter groups.
     """
-    no_decay_ids = set()
+    no_decay_ids: set[int] = set()
     for module in model.modules():
         if isinstance(module, (nn.Embedding, nn.LayerNorm)):
             no_decay_ids.update(id(p) for p in module.parameters(recurse=False))
@@ -77,7 +107,16 @@ def build_scheduler(
     total_steps: int,
     warmup_ratio: float = 0.05,
 ) -> torch.optim.lr_scheduler.LambdaLR:
-    """Linear warmup, then cosine decay to 0. Call ``scheduler.step()`` after every batch."""
+    """Linear warmup, then cosine decay to 0. Call ``scheduler.step()`` after every batch.
+
+    Args:
+        optimizer (torch.optim.Optimizer): Optimizer whose learning rate is scheduled.
+        total_steps (int): Total number of optimizer steps (``epochs * batches_per_epoch``).
+        warmup_ratio (float): Fraction of ``total_steps`` used for linear warmup.
+
+    Returns:
+        torch.optim.lr_scheduler.LambdaLR: The scheduler.
+    """
     total_steps = max(1, total_steps)
     warmup = max(1, int(total_steps * warmup_ratio))
 
@@ -92,10 +131,12 @@ def build_scheduler(
 
 # ---------- epoch loops ----------
 def _model_device(model: nn.Module) -> torch.device:
+    """Device of the model's first parameter."""
     return next(model.parameters()).device
 
 
 def _accumulate(totals: dict[str, float], key: str, value: torch.Tensor, n: int) -> None:
+    """Add ``value * n`` to ``totals[key]`` for a sample-weighted mean."""
     totals[key] = totals.get(key, 0.0) + value.detach().item() * n
 
 
@@ -108,7 +149,24 @@ def train_one_epoch(
     device: torch.device | None = None,
     grad_clip: float | None = 1.0,
 ) -> dict[str, float]:
-    """One pass over ``loader``. Returns the sample-weighted mean of the total and per-feature losses."""
+    """Train for one pass over ``loader``.
+
+    Args:
+        model (nn.Module): The network; set to train mode.
+        criterion (UncertaintyWeightedLoss): Combines the per-feature losses.
+        loader (Iterable[dict[str, Any]]): Training batches from ``CustomCollate(inference=False)``.
+        optimizer (torch.optim.Optimizer): Usually from ``build_optimizer``.
+        scheduler (LRScheduler | None): Stepped after every batch, if given.
+        device (torch.device | None): ``None`` uses the model's device.
+        grad_clip (float | None): Max gradient norm of the model parameters; ``None`` disables it.
+
+    Returns:
+        dict[str, float]: Sample-weighted mean of ``"loss"`` (total) and of each feature's loss.
+
+    Raises:
+        ValueError: If a batch has no targets.
+        FloatingPointError: If the loss becomes NaN or infinite.
+    """
     device = device or _model_device(model)
     model.train()
     criterion.train()
@@ -150,7 +208,20 @@ def evaluate(
     loader: Iterable[dict[str, Any]],
     device: torch.device | None = None,
 ) -> dict[str, float]:
-    """Mean total and per-feature losses over ``loader``, without updating anything."""
+    """Compute losses over ``loader`` without updating anything.
+
+    Args:
+        model (nn.Module): The network; set to eval mode.
+        criterion (UncertaintyWeightedLoss): Combines the per-feature losses.
+        loader (Iterable[dict[str, Any]]): Batches from ``CustomCollate(inference=False)``.
+        device (torch.device | None): ``None`` uses the model's device.
+
+    Returns:
+        dict[str, float]: Sample-weighted mean of ``"loss"`` (total) and of each feature's loss.
+
+    Raises:
+        ValueError: If a batch has no targets.
+    """
     device = device or _model_device(model)
     model.eval()
     criterion.eval()

@@ -1,3 +1,5 @@
+"""Core data types: the dataset wrapper, task types and the ``Feature`` description."""
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
@@ -5,23 +7,38 @@ from typing import Any
 from torch.utils.data import Dataset
 
 
-class CoreDataset(Dataset):
-    """Minimal map-style dataset over a list of samples (one dict per sequence)."""
+class CoreDataset(Dataset[dict[str, Any]]):
+    """Minimal map-style dataset over a list of samples, one dict per sequence.
 
-    def __init__(self, samples):
+    Args:
+        samples (Sequence[dict[str, Any]]): Samples such as
+            ``{"item": [3, 5, 2], "price": [0.1, -0.4, 0.3]}``. Each feature is a list ordered by time.
+
+    Example:
+        >>> loader = DataLoader(CoreDataset(samples), batch_size=32, collate_fn=collate)
+    """
+
+    def __init__(self, samples: Sequence[dict[str, Any]]):
         self.samples = samples
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.samples)
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: int) -> dict[str, Any]:
         return self.samples[idx]
 
 
 class TaskType(Enum):
-    CLASSIFICATION = 'classification'   # predicted, cross entropy, head outputs n_classes logits
-    REGRESSION = 'regression'           # predicted, MSE, head outputs 1 value
-    PASSTHROUGH = 'passthrough'         # input only, no head, no loss
+    """What the model predicts for a feature.
+
+    Attributes:
+        CLASSIFICATION: Predicted with cross entropy; the head outputs ``n_classes`` logits.
+        REGRESSION: Predicted with MSE; the head outputs one value.
+        PASSTHROUGH: Used as input only; no head and no loss.
+    """
+    CLASSIFICATION = 'classification'
+    REGRESSION = 'regression'
+    PASSTHROUGH = 'passthrough'
 
 
 @dataclass
@@ -44,14 +61,17 @@ class Feature:
         >>> Feature("price", "regression", is_linear=True)                   # predict a number
         >>> Feature("age", "classification", is_linear=True, n_classes=3)   # numeric in, 3 buckets out
         >>> Feature("weekday", "passthrough", vocab_size=8)                  # input only
+
+    Raises:
+        ValueError: If the combination of arguments is invalid.
     """
     name: str
-    task: TaskType
+    task: TaskType | str
     vocab_size: int = 0
     is_linear: bool = False
     n_classes: int | None = None
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         self.task = TaskType(self.task)
         if not isinstance(self.name, str) or not self.name:
             raise ValueError(f"Feature name must be a non-empty string, got {self.name!r}")
@@ -73,9 +93,14 @@ class Feature:
             raise ValueError(f"{self.name}: n_classes is only used with task=classification")
 
     def to_dict(self) -> dict[str, Any]:
+        """Plain-Python representation, safe to save as JSON or in a checkpoint.
+
+        Returns:
+            dict[str, Any]: All fields, with ``task`` as its string value.
+        """
         return dict(
             name=self.name,
-            task=self.task.value,
+            task=TaskType(self.task).value,
             vocab_size=self.vocab_size,
             is_linear=self.is_linear,
             n_classes=self.n_classes,
@@ -83,4 +108,12 @@ class Feature:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Feature":
+        """Rebuild a feature from ``to_dict`` output.
+
+        Args:
+            data (dict[str, Any]): Output of ``to_dict``.
+
+        Returns:
+            Feature: The rebuilt, validated feature.
+        """
         return cls(**data)
