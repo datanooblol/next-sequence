@@ -1,21 +1,40 @@
-from typing import Any
+from collections.abc import Hashable, Iterable
 
-def create_bow(array:list)->dict[str, Any]:
-    """
+PAD_TOKEN = 'PAD'
+UNK_TOKEN = 'UNK'
+
+
+def create_bow(
+    sequences: Iterable[Iterable[Hashable]],
+    pad_token: str = PAD_TOKEN,
+    unk_token: str = UNK_TOKEN,
+) -> dict[Hashable, int]:
+    """Build a token -> id vocabulary from training sequences.
+
+    Ids are deterministic: ``pad_token`` is 0, ``unk_token`` is 1, and the remaining tokens are
+    sorted and numbered from 2. Build it from the **training split only**, and map tokens that
+    are missing from it to ``bow[unk_token]``.
+
     Args:
-        array (list): Sequences to build a bag of word
+        sequences (Iterable[Iterable[Hashable]]): Token sequences, e.g. ``[["a", "b"], ["a"]]``.
+        pad_token (str): Token reserved for padding (id 0).
+        unk_token (str): Token reserved for unknown tokens (id 1).
+
     Returns:
-        tuple[dict[str, int], int, int]: A tuple of (bag of word, vocab size, max length)
+        dict[Hashable, int]: The vocabulary. Use ``len(bow)`` as the feature's ``vocab_size``.
+
+    Example:
+        >>> create_bow([["b", "a"], ["a", "c"]])
+        {'PAD': 0, 'UNK': 1, 'a': 2, 'b': 3, 'c': 4}
     """
-    max_len = 0
-    _bow = set()
-    for w in array:
-        _w_len = len(w)
-        if _w_len > max_len:
-            max_len = _w_len
-        _bow |= set(w)
-    bow = {
-        'PAD': 0
-    }
-    bow.update({w:idx+1 for idx, w in enumerate(_bow)})
+    tokens: set[Hashable] = set()
+    for seq in sequences:
+        tokens.update(seq)
+    tokens -= {pad_token, unk_token}
+    try:
+        ordered = sorted(tokens)
+    except TypeError:                       # mixed types, e.g. ints and strings
+        ordered = sorted(tokens, key=lambda t: (type(t).__name__, repr(t)))
+    bow: dict[Hashable, int] = {pad_token: 0, unk_token: 1}
+    bow.update({token: idx for idx, token in enumerate(ordered, start=2)})
     return bow

@@ -1,6 +1,8 @@
 # IDEAS: training API for next-sequence
 
-Status: draft for planning. Nothing here is implemented yet.
+Status: **implemented** (2026-11-15). Layers 2–4 live in `train.py` and `estimator.py` (`NextSequence`);
+the user-side data pipeline is documented in `docs/cookbook.md` with a runnable `examples/quickstart.py`.
+The notes below are kept as the design record.
 
 ## Decisions so far
 

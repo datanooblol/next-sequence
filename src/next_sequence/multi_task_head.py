@@ -12,7 +12,7 @@ class MultiTaskHeads(nn.Module):
         for feature in features:
             if feature.task == TaskType.CLASSIFICATION:
                 # return this one as logits then softmax outside it at prediction
-                self.heads[feature.name] = nn.Linear(d_model, feature.vocab_size)
+                self.heads[feature.name] = nn.Linear(d_model, feature.n_classes)
             elif feature.task == TaskType.REGRESSION:
                 self.heads[feature.name] = nn.Linear(d_model, 1)
             # if more TaskType, then implement below

@@ -1,13 +1,36 @@
 [project]
 name = "next-sequence"
 version = "0.1.0"
-description = "Next-sequence prediction model with a PyTorch backend"
+description = "Multi-task next-event prediction for sequences, with a transformer encoder on PyTorch"
 readme = "README.md"
 requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "doublebank" }]
+keywords = ["sequence", "next-item", "transformer", "multi-task", "pytorch", "recommendation"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
 dependencies = [
     # Keep this generic: the end user's environment decides CPU vs CUDA vs MPS build.
-    "torch>=2.4",
+    # 2.2 is the oldest torch with Python 3.12 wheels; the test suite passes on it.
+    "torch>=2.2",
 ]
+
+[project.urls]
+Homepage = "https://github.com/datanooblol/next-sequence"
+Repository = "https://github.com/datanooblol/next-sequence"
+Issues = "https://github.com/datanooblol/next-sequence/issues"
 
 [dependency-groups]
 dev = [
@@ -17,8 +40,8 @@ dev = [
 ]
 # Dev-only selectors for which torch build uv installs (not published).
 # `gpu` is on by default (see default-groups); use `--no-group gpu --group cpu` for CPU.
-cpu = ["torch>=2.4"]
-gpu = ["torch>=2.4"]
+cpu = ["torch>=2.2"]
+gpu = ["torch>=2.2"]
 
 [build-system]
 requires = ["uv_build>=0.8,<0.10"]

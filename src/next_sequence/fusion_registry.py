@@ -1,38 +1,36 @@
-import torch
-import torch.nn as nn
-from next_sequence.fusion import BaseFusion
-from typing import Any
 from enum import Enum
+from typing import Any
+
+import torch
+
+from next_sequence.fusion import BaseFusion
+
 
 class FusionStrategy(Enum):
     SUM = 'sum'
     CONCAT = 'concat'
 
-class SumFusion(BaseFusion):
 
-    def forward(self, X:dict[str, Any])->Any:
-        _x = torch.stack([
-            X[feature.name]
-            for feature in self.features
-        ]).sum(0)
-        if self.d_model == self.d_out:
-            return _x
-        return self.proj(_x)
+class SumFusion(BaseFusion):
+    """Element-wise sum of the feature embeddings, then optional projection."""
+
+    def forward(self, X: dict[str, Any]) -> Any:
+        x = torch.stack([X[f.name] for f in self.features]).sum(0)
+        return self.proj(x)
+
 
 class ConcatFusion(BaseFusion):
-    def __init__(self, features, d_model, d_out=None):
-        super().__init__(features, len(features)*d_model, d_out)
+    """Concatenate the feature embeddings, then optional projection."""
 
-    def forward(self, X:dict[str, Any])->Any:
-        _x = torch.cat([
-            X[feature.name]
-            for feature in self.features
-        ], dim=-1)
-        if self.d_model == self.d_out:
-            return _x
-        return self.proj(_x)
+    def __init__(self, features, d_model, d_out=None):
+        super().__init__(features, len(features) * d_model, d_out)
+
+    def forward(self, X: dict[str, Any]) -> Any:
+        x = torch.cat([X[f.name] for f in self.features], dim=-1)
+        return self.proj(x)
+
 
 FUSION_REGISTRY = {
-    FusionStrategy.SUM:SumFusion,
-    FusionStrategy.CONCAT:ConcatFusion
+    FusionStrategy.SUM: SumFusion,
+    FusionStrategy.CONCAT: ConcatFusion,
 }

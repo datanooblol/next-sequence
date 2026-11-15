@@ -1,8 +1,6 @@
-# done
 import torch.nn as nn
 from next_sequence.core import Feature
 from typing import Any
-from collections import defaultdict
 
 class EmbeddingModel(nn.Module):
     def __init__(self, features:list[Feature], d_model:int, pad_id:int=0):
@@ -15,13 +13,15 @@ class EmbeddingModel(nn.Module):
         })
 
     def get_embed_model(self, feature:Feature, pad_id):
-        if (feature.is_linear==False) & (feature.vocab_size > 0):
-            return nn.Embedding(feature.vocab_size, self.d_model, padding_idx=pad_id)
-        return nn.Linear(1, self.d_model)
+        if feature.is_linear:
+            return nn.Linear(1, self.d_model)
+        return nn.Embedding(feature.vocab_size, self.d_model, padding_idx=pad_id)
 
     def forward(self, X:dict[str, Any])->dict[str, Any]:
-        _X = defaultdict(list)
+        out = {}
         for feature in self.features:
-            x = self.embedder[feature.name](X[feature.name])
-            _X[feature.name] = x
-        return _X
+            x = X[feature.name]
+            # cast here so a collate function that returns the "wrong" dtype can't crash the layer
+            x = x.float() if feature.is_linear else x.long()
+            out[feature.name] = self.embedder[feature.name](x)
+        return out
