@@ -1,14 +1,17 @@
 """High-level wrapper: ``NextSequence(config).fit(train_loader, val_loader).predict(test_loader)``."""
 import copy
+import math
+import warnings
 from collections.abc import Iterable
 from os import PathLike
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import torch
 from torch.utils.data import DataLoader, RandomSampler
 
-from next_sequence.core import TaskType
+from next_sequence.collate_fn import CustomCollate
+from next_sequence.core import Feature, TaskType
 from next_sequence.loss_fn import UncertaintyWeightedLoss
 from next_sequence.model import NextSequenceConfig, NextSequenceModel
 from next_sequence.train import (
@@ -21,6 +24,21 @@ CHECKPOINT_VERSION = 1
 
 class NotFittedError(RuntimeError):
     """Raised when ``predict`` / ``save`` is called before ``fit`` or ``load``."""
+
+
+class Interval(NamedTuple):
+    """A prediction interval for every sample (all tensors are ``(N,)``).
+
+    Attributes:
+        lower (torch.Tensor): Lower bound.
+        median (torch.Tensor): Median (the central prediction).
+        upper (torch.Tensor): Upper bound.
+        coverage (float): Intended share of true values inside ``[lower, upper]``.
+    """
+    lower: torch.Tensor
+    median: torch.Tensor
+    upper: torch.Tensor
+    coverage: float
 
 
 class NextSequence:
@@ -48,6 +66,7 @@ class NextSequence:
         history_ (list[dict[str, Any]]): One row of metrics per epoch.
         best_epoch_ (int | None): Epoch whose weights were kept (lowest validation loss).
         metadata_ (dict[str, Any] | None): The ``metadata`` saved with the model (after ``load``).
+        calibration_ (dict[str, dict[float, float]] | None): Interval adjustments from ``calibrate``.
 
     Raises:
         TypeError: If ``config`` is not a ``NextSequenceConfig``.
@@ -65,6 +84,7 @@ class NextSequence:
     history_: list[dict[str, Any]]
     best_epoch_: int | None
     metadata_: dict[str, Any] | None
+    calibration_: dict[str, dict[float, float]] | None
 
     def __init__(
         self,
@@ -118,6 +138,47 @@ class NextSequence:
         self.history_ = []
         self.best_epoch_ = None
         self.metadata_ = None
+        self.calibration_ = None
+
+    def _feature(self, name: str) -> Feature:
+        """Look up a feature by name, with a helpful error."""
+        for f in self.config.features:
+            if f.name == name:
+                return f
+        raise KeyError(f"'{name}' is not a feature; features are {[f.name for f in self.config.features]}")
+
+    def _quantile_features(self) -> list[Feature]:
+        """All features with task QUANTILE."""
+        return [f for f in self.config.features if f.task == TaskType.QUANTILE]
+
+    def _check_loader(self, loader: Any, needs_targets: bool, role: str) -> None:
+        """Catch loaders whose settings don't match the model, before any work is done."""
+        if not isinstance(loader, DataLoader):
+            return
+        if role == "predict" and isinstance(loader.sampler, RandomSampler):
+            raise ValueError("predict() needs a loader with shuffle=False so outputs match sample order")
+        collate = loader.collate_fn
+        if not isinstance(collate, CustomCollate):
+            return
+        expected = [f.name for f in self.config.features]
+        got = [f.name for f in collate.features]
+        if got != expected:
+            raise ValueError(f"the {role} loader has features {got} but the model has {expected}. "
+                             f"Build it with CustomCollate.from_config(config, ...).")
+        if collate.recent_first != self.config.recent_first:
+            raise ValueError(f"the {role} loader has recent_first={collate.recent_first} but the model "
+                             f"expects recent_first={self.config.recent_first}. Build it with "
+                             f"CustomCollate.from_config(config, ...).")
+        if collate.max_len is not None and collate.max_len > self.config.max_len:
+            raise ValueError(f"the {role} loader keeps up to {collate.max_len} steps but the model "
+                             f"supports max_len={self.config.max_len}. Use CustomCollate.from_config(config, ...).")
+        if collate.max_len is None:
+            warnings.warn(f"the {role} loader has no max_len: histories longer than {self.config.max_len} "
+                          f"steps will raise an error. Use CustomCollate.from_config(config, ...).",
+                          stacklevel=3)
+        if needs_targets and collate.inference:
+            raise ValueError(f"the {role} loader was built with inference=True, so it has no targets. "
+                             f"Build it with inference=False.")
 
     def train_settings(self) -> dict[str, Any]:
         """Training settings as a dict (saved in checkpoints).
@@ -149,30 +210,35 @@ class NextSequence:
         """Train the model.
 
         Args:
-            train_loader (Iterable[dict[str, Any]]): Batches from ``CustomCollate(inference=False)``; must
-                have a length (e.g. a ``DataLoader``). Shuffle it.
-            val_loader (Iterable[dict[str, Any]] | None): Validation batches. When given, the weights of the
-                epoch with the lowest validation loss are restored at the end.
+            train_loader (Iterable[dict[str, Any]]): Batches from ``CustomCollate(inference=False)``;
+                must have a length (e.g. a ``DataLoader``). Shuffle it.
+            val_loader (Iterable[dict[str, Any]] | None): Validation batches. When given, the weights
+                of the epoch with the lowest validation loss are restored at the end.
 
         Returns:
             NextSequence: ``self``, so calls can be chained.
 
         Raises:
             TypeError: If ``train_loader`` has no length.
-            ValueError: If ``train_loader`` is empty or a batch has no targets.
+            ValueError: If a loader is empty, has no targets or doesn't match the model.
             FloatingPointError: If the loss becomes NaN or infinite.
         """
-        if not (self.warm_start and self.is_fitted):
-            self._build()
-        elif self.seed is not None:
-            torch.manual_seed(self.seed)
-
+        self._check_loader(train_loader, needs_targets=True, role="train")
+        if val_loader is not None:
+            self._check_loader(val_loader, needs_targets=True, role="validation")
         try:
             steps_per_epoch = len(train_loader)          # type: ignore[arg-type]
         except TypeError:
             raise TypeError("train_loader must have a length (e.g. a DataLoader over a map-style dataset)")
         if steps_per_epoch == 0:
             raise ValueError("train_loader is empty")
+
+        if not (self.warm_start and self.is_fitted):
+            self._build()
+        else:
+            self.calibration_ = None                     # new weights invalidate an old calibration
+            if self.seed is not None:
+                torch.manual_seed(self.seed)
 
         optimizer = build_optimizer(self.model_, self.criterion_, self.lr, self.weight_decay)
         scheduler = build_scheduler(optimizer, self.epochs * steps_per_epoch, self.warmup_ratio)
@@ -218,8 +284,51 @@ class NextSequence:
         return names
 
     @torch.no_grad()
+    def _run(
+        self, loader: Iterable[dict[str, Any]], with_targets: bool
+    ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+        """Raw model outputs (and targets) for the whole loader, on CPU, in loader order."""
+        self.model_.eval()
+        chunks: dict[str, list[torch.Tensor]] = {}
+        targets: dict[str, list[torch.Tensor]] = {}
+        for batch in loader:
+            if with_targets and batch.get("Y") is None:
+                raise ValueError("this needs targets; build the loader with inference=False")
+            batch = to_device(batch, self.device)
+            for name, value in self.model_(batch["X"], batch["mask"]).items():
+                chunks.setdefault(name, []).append(value.float().cpu())
+                if with_targets:
+                    targets.setdefault(name, []).append(batch["Y"][name].float().cpu())
+        if not chunks:
+            raise ValueError("loader produced no batches")
+        return ({n: torch.cat(v) for n, v in chunks.items()},
+                {n: torch.cat(v) for n, v in targets.items()})
+
+    def _apply_calibration(self, outputs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        """Shift each interval by its calibrated offset, keeping all bounds ordered."""
+        if not self.calibration_:
+            return outputs
+        outputs = dict(outputs)
+        for f in self._quantile_features():
+            offsets = self.calibration_.get(f.name)
+            if not offsets:
+                continue
+            out = outputs[f.name].clone()
+            m = len(f.coverages)
+            for j, c in enumerate(f.coverages):
+                q = offsets.get(c, 0.0)
+                out[:, m - 1 - j] -= q
+                out[:, m + 1 + j] += q
+            upper = torch.cummax(out[:, m:], dim=-1).values                       # median outward
+            lower = torch.cummin(out[:, :m + 1].flip(-1), dim=-1).values.flip(-1)
+            outputs[f.name] = torch.cat([lower[:, :m], upper], dim=-1)
+        return outputs
+
     def predict(
-        self, loader: Iterable[dict[str, Any]], mask_pad: bool | Iterable[str] = False
+        self,
+        loader: Iterable[dict[str, Any]],
+        mask_pad: bool | Iterable[str] = False,
+        calibrated: bool = True,
     ) -> dict[str, torch.Tensor]:
         """Raw outputs for every sample, in loader order, on CPU.
 
@@ -232,37 +341,151 @@ class NextSequence:
             mask_pad (bool | Iterable[str]): If True, set the PAD logit (class 0) to ``-inf`` for
                 classification features that predict a token from their own vocabulary
                 (categorical input with ``n_classes == vocab_size``). Or pass feature names.
+            calibrated (bool): Apply the interval adjustments from ``calibrate`` (if any).
 
         Returns:
-            dict[str, torch.Tensor]: Per predicted feature: classification ``(N, n_classes)``
-            logits, regression ``(N, 1)`` values, in the scale used for training.
+            dict[str, torch.Tensor]: Per predicted feature, in the scale used for training:
+            classification ``(N, n_classes)`` logits; regression and positive regression ``(N, 1)``;
+            quantile ``(N, len(feature.quantiles))`` from the lowest quantile up (read them with
+            ``interval``).
 
         Raises:
             NotFittedError: If called before ``fit`` or ``load``.
-            ValueError: If the loader shuffles or is empty, or ``mask_pad`` names a
-                non-classification feature.
+            ValueError: If the loader shuffles, is empty or doesn't match the model, or ``mask_pad``
+                names a non-classification feature.
         """
         self._check_fitted()
-        if isinstance(loader, DataLoader) and isinstance(loader.sampler, RandomSampler):
-            raise ValueError("predict() needs a loader with shuffle=False so outputs match sample order")
+        self._check_loader(loader, needs_targets=False, role="predict")
         masked = self._pad_masked_features(mask_pad)
-        self.model_.eval()
-        chunks: dict[str, list[torch.Tensor]] = {}
-        for batch in loader:
-            batch = to_device(batch, self.device)
-            outputs = self.model_(batch["X"], batch["mask"])
-            for name, value in outputs.items():
-                if name in masked:
-                    value = value.clone()
-                    value[..., 0] = float("-inf")
-                chunks.setdefault(name, []).append(value.float().cpu())
-        if not chunks:
-            raise ValueError("loader produced no batches")
-        return {name: torch.cat(parts) for name, parts in chunks.items()}
+        outputs, _ = self._run(loader, with_targets=False)
+        for name in masked:
+            outputs[name] = outputs[name].clone()
+            outputs[name][..., 0] = float("-inf")
+        return self._apply_calibration(outputs) if calibrated else outputs
+
+    def interval(
+        self,
+        outputs: dict[str, torch.Tensor],
+        name: str,
+        coverage: float | None = None,
+    ) -> Interval:
+        """Read one prediction interval of a QUANTILE feature from ``predict`` output.
+
+        Args:
+            outputs (dict[str, torch.Tensor]): The result of ``predict``.
+            name (str): A QUANTILE feature.
+            coverage (float | None): One of the feature's ``coverage`` levels. ``None`` uses the
+                widest one.
+
+        Returns:
+            Interval: ``lower``, ``median``, ``upper`` (each ``(N,)``) and ``coverage``.
+
+        Raises:
+            KeyError: If ``name`` is not a feature.
+            ValueError: If the feature is not QUANTILE or that coverage was not trained.
+
+        Example:
+            >>> out = model.predict(test_loader)
+            >>> iv = model.interval(out, "price", coverage=0.5)
+            >>> iv.lower, iv.median, iv.upper
+        """
+        feature = self._feature(name)
+        if feature.task != TaskType.QUANTILE:
+            raise ValueError(f"'{name}' is a {TaskType(feature.task).value} feature; interval() needs "
+                             f"task='quantile'")
+        levels = feature.coverages
+        chosen = levels[-1] if coverage is None else coverage
+        match = [c for c in levels if math.isclose(c, chosen)]
+        if not match:
+            raise ValueError(f"'{name}' was trained for coverage {list(levels)}, not {chosen}. "
+                             f"Add it to Feature(coverage=...) and train again to predict it.")
+        j = levels.index(match[0])
+        m = len(levels)
+        pred = outputs[name]
+        return Interval(lower=pred[:, m - 1 - j], median=pred[:, m], upper=pred[:, m + 1 + j],
+                        coverage=match[0])
+
+    def interval_coverage(
+        self, loader: Iterable[dict[str, Any]], calibrated: bool = True
+    ) -> list[dict[str, Any]]:
+        """Measure how often the true value falls inside each interval.
+
+        Args:
+            loader (Iterable[dict[str, Any]]): Batches with targets (``inference=False``), e.g.
+                the validation or test split.
+            calibrated (bool): Use the adjustments from ``calibrate`` (if any).
+
+        Returns:
+            list[dict[str, Any]]: One row per QUANTILE feature and coverage level with
+            ``feature``, ``coverage`` (intended), ``observed`` (measured share inside) and
+            ``mean_width``. ``pandas.DataFrame(rows)`` turns it into a table.
+
+        Raises:
+            NotFittedError: If called before ``fit`` or ``load``.
+            ValueError: If there is no QUANTILE feature or the loader has no targets.
+        """
+        self._check_fitted()
+        if not self._quantile_features():
+            raise ValueError("interval_coverage() needs at least one feature with task='quantile'")
+        self._check_loader(loader, needs_targets=True, role="interval_coverage")
+        outputs, targets = self._run(loader, with_targets=True)
+        if calibrated:
+            outputs = self._apply_calibration(outputs)
+        rows = []
+        for f in self._quantile_features():
+            y = targets[f.name]
+            for c in f.coverages:
+                iv = self.interval(outputs, f.name, c)
+                inside = ((y >= iv.lower) & (y <= iv.upper)).float().mean().item()
+                rows.append({"feature": f.name, "coverage": c, "observed": inside,
+                             "mean_width": (iv.upper - iv.lower).mean().item()})
+        return rows
+
+    def calibrate(self, loader: Iterable[dict[str, Any]]) -> dict[str, dict[float, float]]:
+        """Adjust every interval so its coverage on ``loader`` matches the intended level.
+
+        Conformalized quantile regression: for each interval, how far true values fall outside it
+        is measured on ``loader``, and the interval is widened (or narrowed) by the matching
+        quantile of those distances. Use data the model was **not trained on**, e.g. the
+        validation split. ``predict`` applies the adjustment and ``save`` stores it; training
+        again clears it.
+
+        Args:
+            loader (Iterable[dict[str, Any]]): Batches with targets (``inference=False``).
+
+        Returns:
+            dict[str, dict[float, float]]: Feature -> coverage -> offset added on both sides
+            (negative means the interval was narrowed).
+
+        Raises:
+            NotFittedError: If called before ``fit`` or ``load``.
+            ValueError: If there is no QUANTILE feature or the loader has no targets.
+        """
+        self._check_fitted()
+        if not self._quantile_features():
+            raise ValueError("calibrate() needs at least one feature with task='quantile'")
+        self._check_loader(loader, needs_targets=True, role="calibrate")
+        outputs, targets = self._run(loader, with_targets=True)
+        calibration: dict[str, dict[float, float]] = {}
+        for f in self._quantile_features():
+            y = targets[f.name]
+            n = len(y)
+            calibration[f.name] = {}
+            for c in f.coverages:
+                iv = self.interval(outputs, f.name, c)
+                scores = torch.maximum(iv.lower - y, y - iv.upper).sort().values
+                k = math.ceil((n + 1) * c)
+                if k > n:
+                    warnings.warn(f"{f.name}: {n} samples are too few to calibrate coverage {c} exactly; "
+                                  f"using the largest observed miss.", stacklevel=2)
+                    k = n
+                calibration[f.name][c] = scores[k - 1].item()
+        self.calibration_ = calibration
+        return calibration
 
     # ---------- save / load ----------
     def save(self, path: str | PathLike[str], metadata: dict[str, Any] | None = None) -> None:
-        """Save weights, config, training settings, history and your metadata to one file.
+        """Save weights, config, training settings, history, calibration and your metadata to one file.
 
         Args:
             path (str | PathLike[str]): Destination file, e.g. ``"model.pt"``. Parent folders
@@ -287,6 +510,7 @@ class NextSequence:
             "history": self.history_,
             "best_epoch": self.best_epoch_,
             "metadata": metadata,
+            "calibration": self.calibration_,
         }
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         torch.save(checkpoint, path)
@@ -343,6 +567,7 @@ class NextSequence:
         obj.history_ = list(ckpt.get("history") or [])
         obj.best_epoch_ = ckpt.get("best_epoch")
         obj.metadata_ = ckpt.get("metadata")
+        obj.calibration_ = ckpt.get("calibration")
         return obj
 
     def __repr__(self) -> str:

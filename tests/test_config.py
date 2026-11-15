@@ -78,7 +78,8 @@ def test_config_round_trip_is_json_safe(features):
     """Finding #17: config with enums and Features can now be saved and rebuilt."""
     c = cfg(features, fusion_strategy=FusionStrategy.CONCAT, fusion_dim=32)
     data = json.loads(json.dumps(c.to_dict()))
-    assert data["schema_version"] == 1
+    assert data["schema_version"] == 2
+    assert data["recent_first"] is True
     assert NextSequenceConfig.from_dict(data) == c
 
 
@@ -106,3 +107,15 @@ def test_numeric_input_dtype_is_cast(features):
     with torch.no_grad():
         out = model(X)
     assert out["price"].dtype == torch.float32
+
+
+def test_schema_1_configs_load_as_oldest_first(features):
+    data = cfg(features).to_dict()
+    data["schema_version"] = 1
+    data.pop("recent_first")
+    assert NextSequenceConfig.from_dict(data).recent_first is False
+
+
+def test_recent_first_must_be_bool(features):
+    with pytest.raises(ValueError, match="recent_first"):
+        cfg(features, recent_first="yes")

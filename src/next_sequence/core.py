@@ -1,4 +1,5 @@
 """Core data types: the dataset wrapper, task types and the ``Feature`` description."""
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
@@ -32,12 +33,18 @@ class TaskType(Enum):
     """What the model predicts for a feature.
 
     Attributes:
-        CLASSIFICATION: Predicted with cross entropy; the head outputs ``n_classes`` logits.
-        REGRESSION: Predicted with MSE; the head outputs one value.
+        CLASSIFICATION: Cross entropy; outputs ``n_classes`` logits per sample.
+        REGRESSION: MSE; outputs one value of any sign.
+        POSITIVE_REGRESSION: MSE; outputs one value that is always > 0 (softplus). Targets must be
+            >= 0, so scale them by dividing only (no mean subtraction).
+        QUANTILE: Pinball loss; outputs the median and the bounds of each ``coverage`` interval,
+            sorted from lowest to highest quantile. The bounds never cross.
         PASSTHROUGH: Used as input only; no head and no loss.
     """
     CLASSIFICATION = 'classification'
     REGRESSION = 'regression'
+    POSITIVE_REGRESSION = 'positive_regression'
+    QUANTILE = 'quantile'
     PASSTHROUGH = 'passthrough'
 
 
@@ -55,10 +62,15 @@ class Feature:
         n_classes (int | None): Number of output classes for a CLASSIFICATION **target**.
             Defaults to ``vocab_size``. Set it explicitly when the target classes differ from the
             input, e.g. a numeric input whose target is a bucket.
+        coverage (float | Sequence[float] | None): For QUANTILE only: the interval(s) to predict,
+            each in (0, 1). ``0.95`` predicts the 2.5% and 97.5% quantiles; ``(0.5, 0.95)`` predicts
+            both intervals at once. Defaults to ``(0.95,)``. The median is always predicted.
 
     Examples:
         >>> Feature("item", "classification", vocab_size=len(bow))          # predict the next item
         >>> Feature("price", "regression", is_linear=True)                   # predict a number
+        >>> Feature("gap", "positive_regression", is_linear=True)            # a number that is > 0
+        >>> Feature("price", "quantile", is_linear=True, coverage=(0.5, 0.95))   # intervals
         >>> Feature("age", "classification", is_linear=True, n_classes=3)   # numeric in, 3 buckets out
         >>> Feature("weekday", "passthrough", vocab_size=8)                  # input only
 
@@ -70,6 +82,7 @@ class Feature:
     vocab_size: int = 0
     is_linear: bool = False
     n_classes: int | None = None
+    coverage: float | Sequence[float] | None = None
 
     def __post_init__(self) -> None:
         self.task = TaskType(self.task)
@@ -91,6 +104,32 @@ class Feature:
                 raise ValueError(f"{self.name}: classification needs n_classes >= 2, got {self.n_classes}")
         elif self.n_classes is not None:
             raise ValueError(f"{self.name}: n_classes is only used with task=classification")
+        if self.task == TaskType.QUANTILE:
+            self.coverage = _normalize_coverage(self.name, (0.95,) if self.coverage is None else self.coverage)
+        elif self.coverage is not None:
+            raise ValueError(f"{self.name}: coverage is only used with task=quantile")
+
+    @property
+    def coverages(self) -> tuple[float, ...]:
+        """Interval coverages of a QUANTILE feature, sorted ascending (empty for other tasks)."""
+        if self.task != TaskType.QUANTILE or self.coverage is None:
+            return ()
+        return tuple(self.coverage) if not isinstance(self.coverage, float) else (self.coverage,)
+
+    @property
+    def quantiles(self) -> tuple[float, ...]:
+        """Quantile levels predicted for a QUANTILE feature, in output column order.
+
+        Example:
+            >>> Feature("p", "quantile", is_linear=True, coverage=(0.5, 0.95)).quantiles
+            (0.025, 0.25, 0.5, 0.75, 0.975)
+        """
+        levels = self.coverages
+        if not levels:
+            return ()
+        lower = [round((1 - c) / 2, 10) for c in reversed(levels)]
+        upper = [round((1 + c) / 2, 10) for c in levels]
+        return (*lower, 0.5, *upper)
 
     def to_dict(self) -> dict[str, Any]:
         """Plain-Python representation, safe to save as JSON or in a checkpoint.
@@ -104,6 +143,7 @@ class Feature:
             vocab_size=self.vocab_size,
             is_linear=self.is_linear,
             n_classes=self.n_classes,
+            coverage=list(self.coverages) if self.task == TaskType.QUANTILE else None,
         )
 
     @classmethod
@@ -117,3 +157,19 @@ class Feature:
             Feature: The rebuilt, validated feature.
         """
         return cls(**data)
+
+
+def _normalize_coverage(name: str, coverage: float | Sequence[float]) -> tuple[float, ...]:
+    """Validate interval coverages and return them as a sorted tuple of unique floats."""
+    values = [coverage] if isinstance(coverage, (int, float)) else list(coverage)
+    if not values:
+        raise ValueError(f"{name}: coverage needs at least one value, e.g. 0.95")
+    cleaned: list[float] = []
+    for c in values:
+        if isinstance(c, bool) or not isinstance(c, (int, float)) or not math.isfinite(c) or not 0 < c < 1:
+            raise ValueError(f"{name}: each coverage must be a number strictly between 0 and 1 "
+                             f"(e.g. 0.5 or 0.95), got {c!r}")
+        cleaned.append(float(c))
+    if len(set(cleaned)) != len(cleaned):
+        raise ValueError(f"{name}: coverage values must be unique, got {values}")
+    return tuple(sorted(cleaned))

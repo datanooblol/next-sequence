@@ -13,7 +13,7 @@ COOKBOOKS = sorted((Path(__file__).resolve().parents[1] / "cookbooks").glob("*.i
 
 
 def test_cookbooks_exist():
-    assert len(COOKBOOKS) >= 7
+    assert len(COOKBOOKS) >= 8
 
 
 @pytest.mark.cookbook

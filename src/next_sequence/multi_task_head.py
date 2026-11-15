@@ -2,14 +2,17 @@
 import torch
 import torch.nn as nn
 
-from next_sequence.core import Feature, TaskType
+from next_sequence.core import Feature
+from next_sequence.tasks import get_task
 
 
 class MultiTaskHeads(nn.Module):
-    """A linear head for every non-PASSTHROUGH feature.
+    """A linear head for every predicted feature, sized and post-processed by its task.
 
-    - CLASSIFICATION: ``nn.Linear(d_model, n_classes)``, returning raw logits (no softmax).
-    - REGRESSION: ``nn.Linear(d_model, 1)``.
+    - CLASSIFICATION: ``n_classes`` raw logits (no softmax).
+    - REGRESSION: one value.
+    - POSITIVE_REGRESSION: one value passed through softplus (always > 0).
+    - QUANTILE: one column per quantile in ``feature.quantiles``, never crossing.
     - PASSTHROUGH: no head.
 
     Args:
@@ -19,16 +22,10 @@ class MultiTaskHeads(nn.Module):
 
     def __init__(self, features: list[Feature], d_model: int):
         super().__init__()
-        self.features = [f for f in features if f.task != TaskType.PASSTHROUGH]
-        self.heads = nn.ModuleDict()
-        for feature in self.features:
-            if feature.task == TaskType.CLASSIFICATION:
-                assert feature.n_classes is not None      # set by Feature.__post_init__
-                self.heads[feature.name] = nn.Linear(d_model, feature.n_classes)
-            elif feature.task == TaskType.REGRESSION:
-                self.heads[feature.name] = nn.Linear(d_model, 1)
-            else:
-                raise ValueError(f"No head defined for task {feature.task} (feature '{feature.name}')")
+        self.features = [f for f in features if get_task(f).predicted]
+        self.heads = nn.ModuleDict({
+            f.name: nn.Linear(d_model, get_task(f).n_outputs(f)) for f in self.features
+        })
 
     def forward(self, X: torch.Tensor) -> dict[str, torch.Tensor]:
         """Apply every head to the sequence representation.
@@ -37,6 +34,6 @@ class MultiTaskHeads(nn.Module):
             X (torch.Tensor): ``(B, d_model)``.
 
         Returns:
-            dict[str, torch.Tensor]: Classification ``(B, n_classes)`` logits, regression ``(B, 1)``.
+            dict[str, torch.Tensor]: ``(B, n_outputs)`` predictions per predicted feature.
         """
-        return {feature.name: self.heads[feature.name](X) for feature in self.features}
+        return {f.name: get_task(f).transform(self.heads[f.name](X), f) for f in self.features}

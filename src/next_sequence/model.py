@@ -32,6 +32,9 @@ class NextSequenceConfig:
         num_layers (int): Number of transformer encoder blocks.
         expansion (int): Feed-forward hidden width is ``expansion * fusion_dim``.
         dropout (float): Dropout inside the encoder blocks, in ``[0, 1)``.
+        recent_first (bool): Present each history to the model newest event first, so the latest
+            event always sits right next to the CLS token. This makes "what happened last" easy to
+            learn and usually improves accuracy a lot. ``CustomCollate.from_config`` applies it.
 
     Raises:
         ValueError: If any value is invalid.
@@ -55,8 +58,9 @@ class NextSequenceConfig:
     num_layers: int = 2
     expansion: int = 2
     dropout: float = 0.1
+    recent_first: bool = True
 
-    SCHEMA_VERSION: ClassVar[int] = 1
+    SCHEMA_VERSION: ClassVar[int] = 2
     """Version of the ``to_dict`` format, stored in checkpoints."""
 
     def __post_init__(self) -> None:
@@ -88,6 +92,8 @@ class NextSequenceConfig:
             value = getattr(self, field_name)
             if not isinstance(value, int) or isinstance(value, bool) or value < 1:
                 raise ValueError(f"{field_name} must be a positive integer, got {value!r}")
+        if not isinstance(self.recent_first, bool):
+            raise ValueError(f"recent_first must be True or False, got {self.recent_first!r}")
         if not 0.0 <= self.dropout < 1.0:
             raise ValueError(f"dropout must be in [0, 1), got {self.dropout}")
         d = self.model_dim
@@ -114,6 +120,7 @@ class NextSequenceConfig:
             num_layers=self.num_layers,
             expansion=self.expansion,
             dropout=self.dropout,
+            recent_first=self.recent_first,
         )
 
     @classmethod
@@ -136,6 +143,8 @@ class NextSequenceConfig:
                 f"config schema_version {version} is newer than this library supports "
                 f"({cls.SCHEMA_VERSION}). Upgrade next-sequence."
             )
+        if version < 2:
+            data.setdefault("recent_first", False)   # schema 1 models were trained oldest-first
         data["features"] = [Feature.from_dict(f) for f in data["features"]]
         return cls(**data)
 
